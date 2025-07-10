@@ -3,8 +3,11 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use tokio::net::{TcpListener, TcpStream};
-use tokio_tungstenite::{WebSocketStream, accept_async, tungstenite::Message};
-use tracing::{error, info, warn};
+use tokio_tungstenite::{
+    WebSocketStream, accept_async,
+    tungstenite::{Error as TungsteniteError, Message, error::ProtocolError},
+};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Deserialize, Serialize)]
 struct Config {
@@ -102,7 +105,16 @@ async fn handle_socket(
                     break;
                 }
                 Err(e) => {
-                    error!("WebSocket error: {e}");
+                    match e {
+                        TungsteniteError::ConnectionClosed
+                        | TungsteniteError::Protocol(ProtocolError::ResetWithoutClosingHandshake) =>
+                        {
+                            debug!("Client disconnected: {e}");
+                        }
+                        _ => {
+                            error!("WebSocket error: {e}");
+                        }
+                    }
                     break;
                 }
                 _ => {}
