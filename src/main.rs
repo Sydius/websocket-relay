@@ -37,6 +37,14 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let config = load_config()?;
+    info!(
+        config_file = "config.toml",
+        listen_ip = %config.listen.ip,
+        listen_port = config.listen.port,
+        target_ip = %config.target.ip,
+        target_port = config.target.port,
+        "Configuration loaded"
+    );
 
     let addr = format!("{}:{}", config.listen.ip, config.listen.port);
     let listener = TcpListener::bind(&addr)
@@ -44,8 +52,10 @@ async fn main() -> Result<()> {
         .with_context(|| format!("Failed to bind to address {addr}"))?;
 
     info!(
-        "WebSocket proxy listening on {}, forwarding to {}:{}",
-        addr, config.target.ip, config.target.port
+        listen_addr = %addr,
+        target_ip = %config.target.ip,
+        target_port = config.target.port,
+        "WebSocket proxy listening"
     );
 
     while let Ok((stream, addr)) = listener.accept().await {
@@ -53,7 +63,7 @@ async fn main() -> Result<()> {
 
         tokio::spawn(async move {
             if let Err(e) = handle_connection(stream, &target_config).await {
-                error!("Connection from {} failed: {}", addr, e);
+                error!(client_addr = %addr, error = %e, "Connection failed");
             }
         });
     }
@@ -77,11 +87,12 @@ async fn handle_socket(
 ) -> Result<()> {
     let target_addr = format!("{}:{}", target_config.ip, target_config.port);
 
+    debug!(target_addr = %target_addr, "Attempting to connect to target server");
     let tcp_stream = TcpStream::connect(&target_addr)
         .await
         .with_context(|| format!("Failed to connect to target {target_addr}"))?;
 
-    info!("Connected to target server at {}", target_addr);
+    info!(target_addr = %target_addr, "Connected to target server");
 
     let (mut ws_sender, mut ws_receiver) = websocket.split();
     let (mut tcp_reader, mut tcp_writer) = tcp_stream.into_split();
@@ -90,10 +101,11 @@ async fn handle_socket(
         while let Some(msg) = ws_receiver.next().await {
             match msg {
                 Ok(Message::Binary(data)) => {
+                    debug!(bytes = data.len(), "Forwarding data from WebSocket to TCP");
                     if let Err(e) =
                         tokio::io::AsyncWriteExt::write_all(&mut tcp_writer, &data).await
                     {
-                        error!("Failed to write to TCP: {}", e);
+                        error!(error = %e, bytes = data.len(), "Failed to write to TCP");
                         return Err(e).context("Failed to write WebSocket data to TCP connection");
                     }
                 }
@@ -135,8 +147,9 @@ async fn handle_socket(
                 }
                 Ok(n) => {
                     let data = &buffer[..n];
+                    debug!(bytes = n, "Forwarding data from TCP to WebSocket");
                     if let Err(e) = ws_sender.send(Message::Binary(data.to_vec().into())).await {
-                        error!("Failed to send WebSocket message: {e}");
+                        error!(error = %e, bytes = data.len(), "Failed to send WebSocket message");
                         return Err(e).context("Failed to send TCP data via WebSocket");
                     }
                 }
