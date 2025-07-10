@@ -14,17 +14,22 @@ use tracing::{error, info, warn};
 async fn main() {
     tracing_subscriber::fmt::init();
 
+    let target_ip = get_target_ip();
     let target_port = get_target_port();
-    let app = create_app(target_port);
+    let app = create_app(target_ip.clone(), target_port);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 80));
     info!(
-        "WebSocket proxy listening on {}, forwarding to port {}",
-        addr, target_port
+        "WebSocket proxy listening on {}, forwarding to {}:{}",
+        addr, target_ip, target_port
     );
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+fn get_target_ip() -> String {
+    env::var("TARGET_IP").unwrap_or_else(|_| "127.0.0.1".to_string())
 }
 
 fn get_target_port() -> u16 {
@@ -34,21 +39,23 @@ fn get_target_port() -> u16 {
         .expect("TARGET_PORT must be a valid port number")
 }
 
-fn create_app(target_port: u16) -> Router {
+fn create_app(target_ip: String, target_port: u16) -> Router {
     Router::new()
         .route(
             "/",
-            get(move |ws: WebSocketUpgrade| async move { websocket_handler(ws, target_port) }),
+            get(move |ws: WebSocketUpgrade| async move {
+                websocket_handler(ws, target_ip.clone(), target_port)
+            }),
         )
         .layer(TraceLayer::new_for_http())
 }
 
-fn websocket_handler(ws: WebSocketUpgrade, target_port: u16) -> Response {
-    ws.on_upgrade(move |socket| handle_socket(socket, target_port))
+fn websocket_handler(ws: WebSocketUpgrade, target_ip: String, target_port: u16) -> Response {
+    ws.on_upgrade(move |socket| handle_socket(socket, target_ip, target_port))
 }
 
-pub async fn handle_socket(websocket: WebSocket, target_port: u16) {
-    let target_addr = format!("127.0.0.1:{target_port}");
+pub async fn handle_socket(websocket: WebSocket, target_ip: String, target_port: u16) {
+    let target_addr = format!("{target_ip}:{target_port}");
 
     let Ok(tcp_stream) = TcpStream::connect(&target_addr).await else {
         error!("Failed to connect to target {}", target_addr);
@@ -194,7 +201,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
 
-        let app = create_app(target_port);
+        let app = create_app("127.0.0.1".to_string(), target_port);
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
@@ -437,7 +444,7 @@ mod tests {
             let ws_port = find_free_port().await;
             let nonexistent_tcp_port = find_free_port().await;
 
-            let app = create_app(nonexistent_tcp_port);
+            let app = create_app("127.0.0.1".to_string(), nonexistent_tcp_port);
             tokio::spawn(async move {
                 let listener = tokio::net::TcpListener::bind(("127.0.0.1", ws_port))
                     .await
