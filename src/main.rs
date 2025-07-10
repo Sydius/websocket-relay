@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::{
@@ -6,11 +6,17 @@ use std::{
     fs,
     sync::{Arc, Mutex},
 };
-use tokio::net::{TcpListener, TcpStream};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    spawn,
+};
 use tokio_tungstenite::{
-    WebSocketStream,
+    WebSocketStream, accept_hdr_async,
     tungstenite::{
-        Error as TungsteniteError, Message, error::ProtocolError, handshake::server::Request,
+        Error as TungsteniteError, Message,
+        error::ProtocolError,
+        handshake::server::{Request, Response},
     },
 };
 use tracing::{debug, error, info, warn};
@@ -64,7 +70,7 @@ async fn main() -> Result<()> {
     while let Ok((stream, addr)) = listener.accept().await {
         let targets = config.targets.clone();
 
-        tokio::spawn(async move {
+        spawn(async move {
             if let Err(e) = handle_connection(stream, &targets).await {
                 error!(client_addr = %addr, error = %e, "Connection failed");
             }
@@ -82,20 +88,18 @@ async fn handle_connection(
     let host_header = Arc::new(Mutex::new(None::<String>));
     let host_header_clone = host_header.clone();
 
-    let callback =
-        move |req: &Request,
-              response: tokio_tungstenite::tungstenite::handshake::server::Response| {
-            if let Some(host) = req.headers().get("host") {
-                if let Ok(host_str) = host.to_str() {
-                    if let Ok(mut guard) = host_header_clone.lock() {
-                        *guard = Some(host_str.to_string());
-                    }
+    let callback = move |req: &Request, response: Response| {
+        if let Some(host) = req.headers().get("host") {
+            if let Ok(host_str) = host.to_str() {
+                if let Ok(mut guard) = host_header_clone.lock() {
+                    *guard = Some(host_str.to_string());
                 }
             }
-            Ok(response)
-        };
+        }
+        Ok(response)
+    };
 
-    let ws_stream = tokio_tungstenite::accept_hdr_async(stream, callback)
+    let ws_stream = accept_hdr_async(stream, callback)
         .await
         .context("Failed to perform WebSocket handshake")?;
 
@@ -103,12 +107,12 @@ async fn handle_connection(
         .lock()
         .unwrap()
         .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("No Host header found in request"))?
+        .ok_or_else(|| anyhow!("No Host header found in request"))?
         .clone();
 
     let target_config = targets
         .get(&host)
-        .ok_or_else(|| anyhow::anyhow!("No target configured for domain: {}", host))?;
+        .ok_or_else(|| anyhow!("No target configured for domain: {}", host))?;
 
     info!(host = %host, target_host = %target_config.host, target_port = target_config.port, "Routing request");
     handle_socket(ws_stream, target_config).await?;
@@ -137,9 +141,7 @@ async fn handle_socket(
             match msg {
                 Ok(Message::Binary(data)) => {
                     debug!(bytes = data.len(), "Forwarding data from WebSocket to TCP");
-                    if let Err(e) =
-                        tokio::io::AsyncWriteExt::write_all(&mut tcp_writer, &data).await
-                    {
+                    if let Err(e) = tcp_writer.write_all(&data).await {
                         error!(error = %e, bytes = data.len(), "Failed to write to TCP");
                         return Err(e).context("Failed to write WebSocket data to TCP connection");
                     }
@@ -171,7 +173,6 @@ async fn handle_socket(
     };
 
     let tcp_to_ws = async {
-        use tokio::io::AsyncReadExt;
         let mut buffer = [0u8; 1024];
 
         loop {
@@ -209,6 +210,7 @@ async fn handle_socket(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::bail;
     use futures_util::{SinkExt, StreamExt};
     use std::{sync::Arc, time::Duration};
     use tokio::{
@@ -217,7 +219,10 @@ mod tests {
         sync::Mutex,
         time::{sleep, timeout},
     };
-    use tokio_tungstenite::{connect_async, tungstenite::Message};
+    use tokio_tungstenite::{
+        connect_async,
+        tungstenite::{Message, client::IntoClientRequest},
+    };
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(1);
     const SERVER_STARTUP_DELAY: Duration = Duration::from_millis(100);
@@ -263,7 +268,7 @@ mod tests {
 
         match response {
             Message::Binary(data) => Ok(data.to_vec()),
-            other => anyhow::bail!("Expected binary message, got: {other:?}"),
+            other => bail!("Expected binary message, got: {other:?}"),
         }
     }
 
@@ -290,7 +295,7 @@ mod tests {
             .context("Failed to get proxy server local address")?
             .port();
 
-        tokio::spawn(async move {
+        spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let mut targets = HashMap::new();
                 targets.insert(
@@ -314,7 +319,7 @@ mod tests {
                         port: target_port,
                     },
                 );
-                tokio::spawn(async move {
+                spawn(async move {
                     let _ = handle_connection(stream, &targets).await;
                 });
             }
@@ -333,9 +338,9 @@ mod tests {
             .context("Failed to get echo server local address")?
             .port();
 
-        tokio::spawn(async move {
+        spawn(async move {
             while let Ok((mut stream, _)) = listener.accept().await {
-                tokio::spawn(async move {
+                spawn(async move {
                     let mut buffer = [0; 4096];
                     loop {
                         match stream.read(&mut buffer).await {
@@ -433,7 +438,7 @@ mod tests {
 
             let tasks: Vec<_> = (0..3)
                 .map(|i| {
-                    tokio::spawn(async move {
+                    spawn(async move {
                         let (mut sender, mut receiver) = connect_websocket(ws_port).await.unwrap();
                         let test_data = format!("Message from client {i}").into_bytes();
 
@@ -461,7 +466,7 @@ mod tests {
             let tcp_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let tcp_port = tcp_listener.local_addr().unwrap().port();
 
-            tokio::spawn(async move {
+            spawn(async move {
                 if let Ok((mut stream, _)) = tcp_listener.accept().await {
                     let mut buffer = [0u8; 1024];
                     while let Ok(n) = stream.read(&mut buffer).await {
@@ -484,7 +489,7 @@ mod tests {
             let tcp_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let tcp_port = tcp_listener.local_addr().unwrap().port();
 
-            tokio::spawn(async move {
+            spawn(async move {
                 if let Ok((mut stream, _)) = tcp_listener.accept().await {
                     sleep(SERVER_STARTUP_DELAY).await;
                     let _ = stream.write_all(&data).await;
@@ -566,15 +571,12 @@ mod tests {
             host: &str,
         ) -> Result<(WsSender, WsReceiver)> {
             let url = format!("ws://127.0.0.1:{ws_port}/");
-            let mut request =
-                tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(
-                    url,
-                )?;
+            let mut request = IntoClientRequest::into_client_request(url)?;
             request
                 .headers_mut()
                 .insert("host", HeaderValue::from_str(host)?);
 
-            let (ws_stream, _) = tokio_tungstenite::connect_async(request)
+            let (ws_stream, _) = connect_async(request)
                 .await
                 .context("Failed to connect to WebSocket server")?;
             Ok(ws_stream.split())
@@ -585,7 +587,7 @@ mod tests {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
             let ws_port = listener.local_addr()?.port();
 
-            tokio::spawn(async move {
+            spawn(async move {
                 while let Ok((stream, _)) = listener.accept().await {
                     let mut targets = HashMap::new();
                     for (domain, tcp_port) in &domains {
@@ -597,7 +599,7 @@ mod tests {
                             },
                         );
                     }
-                    tokio::spawn(async move {
+                    spawn(async move {
                         let _ = handle_connection(stream, &targets).await;
                     });
                 }
@@ -724,13 +726,11 @@ mod tests {
 
             // Connect without Host header - test that server handles this gracefully
             let url = format!("ws://127.0.0.1:{ws_port}/");
-            let mut request =
-                tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(url)
-                    .unwrap();
+            let mut request = IntoClientRequest::into_client_request(url).unwrap();
             // Remove Host header if it exists
             request.headers_mut().remove("host");
 
-            let _result = timeout(TEST_TIMEOUT, tokio_tungstenite::connect_async(request)).await;
+            let _result = timeout(TEST_TIMEOUT, connect_async(request)).await;
 
             // Connection may fail at various points - what matters is no server crash
             // Test that server continues working by making a valid connection
@@ -752,7 +752,7 @@ mod tests {
             let ws_port = find_free_port().await.unwrap();
             let nonexistent_tcp_port = find_free_port().await.unwrap();
 
-            tokio::spawn(async move {
+            spawn(async move {
                 let listener = TcpListener::bind(("127.0.0.1", ws_port)).await.unwrap();
                 while let Ok((stream, _)) = listener.accept().await {
                     let mut targets = HashMap::new();
@@ -763,7 +763,7 @@ mod tests {
                             port: nonexistent_tcp_port,
                         },
                     );
-                    tokio::spawn(async move {
+                    spawn(async move {
                         let _ = handle_connection(stream, &targets).await;
                     });
                 }
