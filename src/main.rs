@@ -9,19 +9,19 @@ use tokio_tungstenite::{
 };
 use tracing::{debug, error, info, warn};
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct Config {
     listen: ListenConfig,
     target: TargetConfig,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct ListenConfig {
     ip: String,
     port: u16,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 struct TargetConfig {
     ip: String,
     port: u16,
