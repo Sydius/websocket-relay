@@ -1,13 +1,7 @@
-use axum::{
-    Router,
-    extract::{WebSocketUpgrade, ws::WebSocket},
-    response::Response,
-    routing::get,
-};
 use futures_util::{SinkExt, StreamExt};
 use std::env;
-use tokio::net::TcpStream;
-use tower_http::trace::TraceLayer;
+use tokio::net::{TcpListener, TcpStream};
+use tokio_tungstenite::{WebSocketStream, accept_async, tungstenite::Message};
 use tracing::{error, info, warn};
 
 #[tokio::main]
@@ -18,7 +12,6 @@ async fn main() {
     let listen_port = get_listen_port();
     let target_ip = get_target_ip();
     let target_port = get_target_port();
-    let app = create_app(target_ip.clone(), target_port);
 
     let addr = format!("{listen_ip}:{listen_port}");
     info!(
@@ -26,8 +19,17 @@ async fn main() {
         addr, target_ip, target_port
     );
 
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    let listener = TcpListener::bind(&addr).await.unwrap();
+
+    while let Ok((stream, addr)) = listener.accept().await {
+        let target_ip = target_ip.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) = handle_connection(stream, target_ip, target_port).await {
+                error!("Connection from {} failed: {}", addr, e);
+            }
+        });
+    }
 }
 
 fn get_listen_ip() -> String {
@@ -52,22 +54,21 @@ fn get_target_port() -> u16 {
         .expect("TARGET_PORT must be a valid port number")
 }
 
-fn create_app(target_ip: String, target_port: u16) -> Router {
-    Router::new()
-        .route(
-            "/",
-            get(move |ws: WebSocketUpgrade| async move {
-                websocket_handler(ws, target_ip.clone(), target_port)
-            }),
-        )
-        .layer(TraceLayer::new_for_http())
+async fn handle_connection(
+    stream: TcpStream,
+    target_ip: String,
+    target_port: u16,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let ws_stream = accept_async(stream).await?;
+    handle_socket(ws_stream, target_ip, target_port).await;
+    Ok(())
 }
 
-fn websocket_handler(ws: WebSocketUpgrade, target_ip: String, target_port: u16) -> Response {
-    ws.on_upgrade(move |socket| handle_socket(socket, target_ip, target_port))
-}
-
-pub async fn handle_socket(websocket: WebSocket, target_ip: String, target_port: u16) {
+pub async fn handle_socket(
+    websocket: WebSocketStream<TcpStream>,
+    target_ip: String,
+    target_port: u16,
+) {
     let target_addr = format!("{target_ip}:{target_port}");
 
     let Ok(tcp_stream) = TcpStream::connect(&target_addr).await else {
@@ -83,7 +84,7 @@ pub async fn handle_socket(websocket: WebSocket, target_ip: String, target_port:
     let ws_to_tcp = async {
         while let Some(msg) = ws_receiver.next().await {
             match msg {
-                Ok(axum::extract::ws::Message::Binary(data)) => {
+                Ok(Message::Binary(data)) => {
                     if let Err(e) =
                         tokio::io::AsyncWriteExt::write_all(&mut tcp_writer, &data).await
                     {
@@ -91,10 +92,10 @@ pub async fn handle_socket(websocket: WebSocket, target_ip: String, target_port:
                         break;
                     }
                 }
-                Ok(axum::extract::ws::Message::Text(_)) => {
+                Ok(Message::Text(_)) => {
                     warn!("Dropping text message (binary only)");
                 }
-                Ok(axum::extract::ws::Message::Close(_)) => {
+                Ok(Message::Close(_)) => {
                     info!("WebSocket connection closed");
                     break;
                 }
@@ -119,10 +120,7 @@ pub async fn handle_socket(websocket: WebSocket, target_ip: String, target_port:
                 }
                 Ok(n) => {
                     let data = &buffer[..n];
-                    if let Err(e) = ws_sender
-                        .send(axum::extract::ws::Message::Binary(data.to_vec().into()))
-                        .await
-                    {
+                    if let Err(e) = ws_sender.send(Message::Binary(data.to_vec().into())).await {
                         error!("Failed to send WebSocket message: {}", e);
                         break;
                     }
@@ -214,9 +212,13 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
 
-        let app = create_app("127.0.0.1".to_string(), target_port);
         tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
+            while let Ok((stream, _)) = listener.accept().await {
+                let target_ip = "127.0.0.1".to_string();
+                tokio::spawn(async move {
+                    let _ = handle_connection(stream, target_ip, target_port).await;
+                });
+            }
         });
 
         port
@@ -457,12 +459,14 @@ mod tests {
             let ws_port = find_free_port().await;
             let nonexistent_tcp_port = find_free_port().await;
 
-            let app = create_app("127.0.0.1".to_string(), nonexistent_tcp_port);
             tokio::spawn(async move {
-                let listener = tokio::net::TcpListener::bind(("127.0.0.1", ws_port))
-                    .await
-                    .unwrap();
-                axum::serve(listener, app).await.unwrap();
+                let listener = TcpListener::bind(("127.0.0.1", ws_port)).await.unwrap();
+                while let Ok((stream, _)) = listener.accept().await {
+                    let target_ip = "127.0.0.1".to_string();
+                    tokio::spawn(async move {
+                        let _ = handle_connection(stream, target_ip, nonexistent_tcp_port).await;
+                    });
+                }
             });
 
             sleep(SERVER_STARTUP_DELAY).await;
