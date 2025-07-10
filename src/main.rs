@@ -5,7 +5,7 @@ use axum::{
     routing::get,
 };
 use futures_util::{SinkExt, StreamExt};
-use std::{env, net::SocketAddr};
+use std::env;
 use tokio::net::TcpStream;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
@@ -14,18 +14,31 @@ use tracing::{error, info, warn};
 async fn main() {
     tracing_subscriber::fmt::init();
 
+    let listen_ip = get_listen_ip();
+    let listen_port = get_listen_port();
     let target_ip = get_target_ip();
     let target_port = get_target_port();
     let app = create_app(target_ip.clone(), target_port);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 80));
+    let addr = format!("{listen_ip}:{listen_port}");
     info!(
         "WebSocket proxy listening on {}, forwarding to {}:{}",
         addr, target_ip, target_port
     );
 
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+fn get_listen_ip() -> String {
+    env::var("LISTEN_IP").unwrap_or_else(|_| "0.0.0.0".to_string())
+}
+
+fn get_listen_port() -> u16 {
+    env::var("LISTEN_PORT")
+        .unwrap_or_else(|_| "80".to_string())
+        .parse::<u16>()
+        .expect("LISTEN_PORT must be a valid port number")
 }
 
 fn get_target_ip() -> String {
