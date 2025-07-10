@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::fs;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{
@@ -9,19 +9,19 @@ use tokio_tungstenite::{
 };
 use tracing::{debug, error, info, warn};
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize)]
 struct Config {
     listen: ListenConfig,
     target: TargetConfig,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize)]
 struct ListenConfig {
     ip: String,
     port: u16,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct TargetConfig {
     ip: String,
     port: u16,
