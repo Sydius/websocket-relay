@@ -71,7 +71,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-#[tracing::instrument(skip(stream, target_config), fields(client_addr = ?stream.peer_addr()))]
+#[tracing::instrument(skip(stream, target_config), fields(client_addr = %stream.peer_addr().unwrap_or_else(|_| "unknown".parse().unwrap())))]
 async fn handle_connection(stream: TcpStream, target_config: &TargetConfig) -> Result<()> {
     let ws_stream = accept_async(stream)
         .await
