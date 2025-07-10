@@ -110,7 +110,7 @@ async fn handle_connection(
         .get(&host)
         .ok_or_else(|| anyhow::anyhow!("No target configured for domain: {}", host))?;
 
-    debug!(host = %host, target_host = %target_config.host, target_port = target_config.port, "Routing request");
+    info!(host = %host, target_host = %target_config.host, target_port = target_config.port, "Routing request");
     handle_socket(ws_stream, target_config).await?;
     Ok(())
 }
@@ -557,16 +557,187 @@ mod tests {
 
     mod domain_routing {
         use super::*;
+        use std::collections::HashMap;
+        use tokio_tungstenite::tungstenite::http::HeaderValue;
+
+        /// Helper to create WebSocket connection with custom Host header
+        async fn connect_websocket_with_host(
+            ws_port: u16,
+            host: &str,
+        ) -> Result<(WsSender, WsReceiver)> {
+            let url = format!("ws://127.0.0.1:{ws_port}/");
+            let mut request =
+                tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(
+                    url,
+                )?;
+            request
+                .headers_mut()
+                .insert("host", HeaderValue::from_str(host)?);
+
+            let (ws_stream, _) = tokio_tungstenite::connect_async(request)
+                .await
+                .context("Failed to connect to WebSocket server")?;
+            Ok(ws_stream.split())
+        }
+
+        /// Helper to start proxy with specific domain mappings
+        async fn start_proxy_with_domains(domains: HashMap<String, u16>) -> Result<u16> {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let ws_port = listener.local_addr()?.port();
+
+            tokio::spawn(async move {
+                while let Ok((stream, _)) = listener.accept().await {
+                    let mut targets = HashMap::new();
+                    for (domain, tcp_port) in &domains {
+                        targets.insert(
+                            domain.clone(),
+                            TargetConfig {
+                                host: "127.0.0.1".to_string(),
+                                port: *tcp_port,
+                            },
+                        );
+                    }
+                    tokio::spawn(async move {
+                        let _ = handle_connection(stream, &targets).await;
+                    });
+                }
+            });
+
+            sleep(SERVER_STARTUP_DELAY).await;
+            Ok(ws_port)
+        }
 
         #[tokio::test]
-        async fn routes_to_correct_target() {
+        async fn routes_different_domains_to_different_targets() {
+            let tcp_port1 = start_echo_server().await.unwrap();
+            let tcp_port2 = start_echo_server().await.unwrap();
+
+            let mut domains = HashMap::new();
+            domains.insert("domain1.test".to_string(), tcp_port1);
+            domains.insert("domain2.test".to_string(), tcp_port2);
+
+            let ws_port = start_proxy_with_domains(domains).await.unwrap();
+
+            // Test domain1.test routes to tcp_port1
+            let (mut sender1, mut receiver1) = connect_websocket_with_host(ws_port, "domain1.test")
+                .await
+                .unwrap();
+            let test_data1 = b"Message for domain1";
+            send_binary_message(&mut sender1, test_data1).await.unwrap();
+            let received1 = receive_binary_message(&mut receiver1).await.unwrap();
+            assert_eq!(received1, test_data1);
+
+            // Test domain2.test routes to tcp_port2
+            let (mut sender2, mut receiver2) = connect_websocket_with_host(ws_port, "domain2.test")
+                .await
+                .unwrap();
+            let test_data2 = b"Message for domain2";
+            send_binary_message(&mut sender2, test_data2).await.unwrap();
+            let received2 = receive_binary_message(&mut receiver2).await.unwrap();
+            assert_eq!(received2, test_data2);
+        }
+
+        #[tokio::test]
+        async fn server_continues_after_unknown_domain() {
+            // Test that server continues to handle valid requests after encountering unknown domain
             let tcp_port = start_echo_server().await.unwrap();
-            let ws_port = start_proxy_server(tcp_port).await.unwrap();
 
-            // This should work because start_proxy_server adds localhost as a valid domain
-            let (mut sender, mut receiver) = connect_websocket(ws_port).await.unwrap();
+            let mut domains = HashMap::new();
+            domains.insert("known-domain.test".to_string(), tcp_port);
 
-            let test_data = b"Domain routing test";
+            let ws_port = start_proxy_with_domains(domains).await.unwrap();
+
+            // Try unknown domain (we don't care about the specific failure mode)
+            let _ = connect_websocket_with_host(ws_port, "unknown-domain.test").await;
+
+            // The real test: verify server still processes valid domains correctly
+            let (mut sender, mut receiver) =
+                connect_websocket_with_host(ws_port, "known-domain.test")
+                    .await
+                    .unwrap();
+            let test_data = b"Server still works";
+            send_binary_message(&mut sender, test_data).await.unwrap();
+            let received = receive_binary_message(&mut receiver).await.unwrap();
+            assert_eq!(received, test_data);
+        }
+
+        #[tokio::test]
+        async fn handles_host_header_with_port() {
+            let tcp_port = start_echo_server().await.unwrap();
+
+            let mut domains = HashMap::new();
+            domains.insert("example.com:8080".to_string(), tcp_port);
+
+            let ws_port = start_proxy_with_domains(domains).await.unwrap();
+
+            // Test with port in Host header
+            let (mut sender, mut receiver) =
+                connect_websocket_with_host(ws_port, "example.com:8080")
+                    .await
+                    .unwrap();
+            let test_data = b"Message with port";
+            send_binary_message(&mut sender, test_data).await.unwrap();
+            let received = receive_binary_message(&mut receiver).await.unwrap();
+            assert_eq!(received, test_data);
+        }
+
+        #[tokio::test]
+        async fn routes_based_on_configured_domains() {
+            let tcp_port1 = start_echo_server().await.unwrap();
+            let tcp_port2 = start_echo_server().await.unwrap();
+
+            let mut domains = HashMap::new();
+            domains.insert("service-a.test".to_string(), tcp_port1);
+            domains.insert("service-b.test".to_string(), tcp_port2);
+
+            let ws_port = start_proxy_with_domains(domains).await.unwrap();
+
+            // Test service-a.test routes correctly
+            let (mut sender1, mut receiver1) =
+                connect_websocket_with_host(ws_port, "service-a.test")
+                    .await
+                    .unwrap();
+            let test_data1 = b"Message for service A";
+            send_binary_message(&mut sender1, test_data1).await.unwrap();
+            let received1 = receive_binary_message(&mut receiver1).await.unwrap();
+            assert_eq!(received1, test_data1);
+
+            // Test service-b.test routes correctly
+            let (mut sender2, mut receiver2) =
+                connect_websocket_with_host(ws_port, "service-b.test")
+                    .await
+                    .unwrap();
+            let test_data2 = b"Message for service B";
+            send_binary_message(&mut sender2, test_data2).await.unwrap();
+            let received2 = receive_binary_message(&mut receiver2).await.unwrap();
+            assert_eq!(received2, test_data2);
+        }
+
+        #[tokio::test]
+        async fn handles_missing_host_header() {
+            let tcp_port = start_echo_server().await.unwrap();
+
+            let mut domains = HashMap::new();
+            domains.insert("example.com".to_string(), tcp_port);
+
+            let ws_port = start_proxy_with_domains(domains).await.unwrap();
+
+            // Connect without Host header - test that server handles this gracefully
+            let url = format!("ws://127.0.0.1:{ws_port}/");
+            let mut request =
+                tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(url)
+                    .unwrap();
+            // Remove Host header if it exists
+            request.headers_mut().remove("host");
+
+            let _result = timeout(TEST_TIMEOUT, tokio_tungstenite::connect_async(request)).await;
+
+            // Connection may fail at various points - what matters is no server crash
+            // Test that server continues working by making a valid connection
+            let (mut sender, mut receiver) = connect_websocket_with_host(ws_port, "example.com")
+                .await
+                .unwrap();
+            let test_data = b"Server still works";
             send_binary_message(&mut sender, test_data).await.unwrap();
             let received = receive_binary_message(&mut receiver).await.unwrap();
             assert_eq!(received, test_data);
