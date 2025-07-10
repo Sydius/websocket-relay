@@ -1,75 +1,71 @@
 use futures_util::{SinkExt, StreamExt};
-use std::env;
+use serde::{Deserialize, Serialize};
+use std::fs;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{WebSocketStream, accept_async, tungstenite::Message};
 use tracing::{error, info, warn};
+
+#[derive(Debug, Deserialize, Serialize)]
+struct Config {
+    listen: ListenConfig,
+    target: TargetConfig,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ListenConfig {
+    ip: String,
+    port: u16,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct TargetConfig {
+    ip: String,
+    port: u16,
+}
+
+fn load_config() -> Config {
+    let content =
+        fs::read_to_string("config.toml").expect("Failed to read config.toml - file is required");
+
+    toml::from_str(&content).expect("Failed to parse config.toml - configuration is invalid")
+}
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt::init();
 
-    let listen_ip = get_listen_ip();
-    let listen_port = get_listen_port();
-    let target_ip = get_target_ip();
-    let target_port = get_target_port();
+    let config = load_config();
 
-    let addr = format!("{listen_ip}:{listen_port}");
+    let addr = format!("{}:{}", config.listen.ip, config.listen.port);
     info!(
         "WebSocket proxy listening on {}, forwarding to {}:{}",
-        addr, target_ip, target_port
+        addr, config.target.ip, config.target.port
     );
 
     let listener = TcpListener::bind(&addr).await.unwrap();
 
     while let Ok((stream, addr)) = listener.accept().await {
-        let target_ip = target_ip.clone();
+        let target_config = config.target.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, target_ip, target_port).await {
+            if let Err(e) = handle_connection(stream, &target_config).await {
                 error!("Connection from {} failed: {}", addr, e);
             }
         });
     }
 }
 
-fn get_listen_ip() -> String {
-    env::var("LISTEN_IP").unwrap_or_else(|_| "0.0.0.0".to_string())
-}
-
-fn get_listen_port() -> u16 {
-    env::var("LISTEN_PORT")
-        .unwrap_or_else(|_| "80".to_string())
-        .parse::<u16>()
-        .expect("LISTEN_PORT must be a valid port number")
-}
-
-fn get_target_ip() -> String {
-    env::var("TARGET_IP").unwrap_or_else(|_| "127.0.0.1".to_string())
-}
-
-fn get_target_port() -> u16 {
-    env::var("TARGET_PORT")
-        .unwrap_or_else(|_| "8080".to_string())
-        .parse::<u16>()
-        .expect("TARGET_PORT must be a valid port number")
-}
-
 async fn handle_connection(
     stream: TcpStream,
-    target_ip: String,
-    target_port: u16,
+    target_config: &TargetConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let ws_stream = accept_async(stream).await?;
-    handle_socket(ws_stream, target_ip, target_port).await;
+    handle_socket(ws_stream, target_config).await;
     Ok(())
 }
 
-pub async fn handle_socket(
-    websocket: WebSocketStream<TcpStream>,
-    target_ip: String,
-    target_port: u16,
-) {
-    let target_addr = format!("{target_ip}:{target_port}");
+async fn handle_socket(websocket: WebSocketStream<TcpStream>, target_config: &TargetConfig) {
+    let target_addr = format!("{}:{}", target_config.ip, target_config.port);
 
     let Ok(tcp_stream) = TcpStream::connect(&target_addr).await else {
         error!("Failed to connect to target {}", target_addr);
@@ -214,9 +210,12 @@ mod tests {
 
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
-                let target_ip = "127.0.0.1".to_string();
+                let target_config = TargetConfig {
+                    ip: "127.0.0.1".to_string(),
+                    port: target_port,
+                };
                 tokio::spawn(async move {
-                    let _ = handle_connection(stream, target_ip, target_port).await;
+                    let _ = handle_connection(stream, &target_config).await;
                 });
             }
         });
@@ -462,9 +461,12 @@ mod tests {
             tokio::spawn(async move {
                 let listener = TcpListener::bind(("127.0.0.1", ws_port)).await.unwrap();
                 while let Ok((stream, _)) = listener.accept().await {
-                    let target_ip = "127.0.0.1".to_string();
+                    let target_config = TargetConfig {
+                        ip: "127.0.0.1".to_string(),
+                        port: nonexistent_tcp_port,
+                    };
                     tokio::spawn(async move {
-                        let _ = handle_connection(stream, target_ip, nonexistent_tcp_port).await;
+                        let _ = handle_connection(stream, &target_config).await;
                     });
                 }
             });
