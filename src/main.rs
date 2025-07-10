@@ -58,6 +58,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+#[tracing::instrument(skip(stream, target_config), fields(client_addr = ?stream.peer_addr()))]
 async fn handle_connection(stream: TcpStream, target_config: &TargetConfig) -> Result<()> {
     let ws_stream = accept_async(stream)
         .await
@@ -66,6 +67,7 @@ async fn handle_connection(stream: TcpStream, target_config: &TargetConfig) -> R
     Ok(())
 }
 
+#[tracing::instrument(skip(websocket, target_config))]
 async fn handle_socket(
     websocket: WebSocketStream<TcpStream>,
     target_config: &TargetConfig,
