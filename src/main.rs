@@ -1,18 +1,24 @@
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use std::fs;
+use std::{
+    collections::HashMap,
+    fs,
+    sync::{Arc, Mutex},
+};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{
-    WebSocketStream, accept_async,
-    tungstenite::{Error as TungsteniteError, Message, error::ProtocolError},
+    WebSocketStream,
+    tungstenite::{
+        Error as TungsteniteError, Message, error::ProtocolError, handshake::server::Request,
+    },
 };
 use tracing::{debug, error, info, warn};
 
 #[derive(Deserialize)]
 struct Config {
     listen: ListenConfig,
-    target: TargetConfig,
+    targets: HashMap<String, TargetConfig>,
 }
 
 #[derive(Deserialize)]
@@ -41,8 +47,7 @@ async fn main() -> Result<()> {
         config_file = "config.toml",
         listen_ip = %config.listen.ip,
         listen_port = config.listen.port,
-        target_host = %config.target.host,
-        target_port = config.target.port,
+        targets_count = config.targets.len(),
         "Configuration loaded"
     );
 
@@ -57,10 +62,10 @@ async fn main() -> Result<()> {
     );
 
     while let Ok((stream, addr)) = listener.accept().await {
-        let target_config = config.target.clone();
+        let targets = config.targets.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, &target_config).await {
+            if let Err(e) = handle_connection(stream, &targets).await {
                 error!(client_addr = %addr, error = %e, "Connection failed");
             }
         });
@@ -69,11 +74,43 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-#[tracing::instrument(skip(stream, target_config), fields(client_addr = %stream.peer_addr().unwrap_or_else(|_| "unknown".parse().unwrap())))]
-async fn handle_connection(stream: TcpStream, target_config: &TargetConfig) -> Result<()> {
-    let ws_stream = accept_async(stream)
+#[tracing::instrument(skip(stream, targets), fields(client_addr = %stream.peer_addr().unwrap_or_else(|_| "unknown".parse().unwrap())))]
+async fn handle_connection(
+    stream: TcpStream,
+    targets: &HashMap<String, TargetConfig>,
+) -> Result<()> {
+    let host_header = Arc::new(Mutex::new(None::<String>));
+    let host_header_clone = host_header.clone();
+
+    let callback =
+        move |req: &Request,
+              response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+            if let Some(host) = req.headers().get("host") {
+                if let Ok(host_str) = host.to_str() {
+                    if let Ok(mut guard) = host_header_clone.lock() {
+                        *guard = Some(host_str.to_string());
+                    }
+                }
+            }
+            Ok(response)
+        };
+
+    let ws_stream = tokio_tungstenite::accept_hdr_async(stream, callback)
         .await
         .context("Failed to perform WebSocket handshake")?;
+
+    let host = host_header
+        .lock()
+        .unwrap()
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("No Host header found in request"))?
+        .clone();
+
+    let target_config = targets
+        .get(&host)
+        .ok_or_else(|| anyhow::anyhow!("No target configured for domain: {}", host))?;
+
+    debug!(host = %host, target_host = %target_config.host, target_port = target_config.port, "Routing request");
     handle_socket(ws_stream, target_config).await?;
     Ok(())
 }
@@ -255,12 +292,30 @@ mod tests {
 
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
-                let target_config = TargetConfig {
-                    host: "127.0.0.1".to_string(),
-                    port: target_port,
-                };
+                let mut targets = HashMap::new();
+                targets.insert(
+                    "127.0.0.1:8080".to_string(),
+                    TargetConfig {
+                        host: "127.0.0.1".to_string(),
+                        port: target_port,
+                    },
+                );
+                targets.insert(
+                    format!("127.0.0.1:{port}"),
+                    TargetConfig {
+                        host: "127.0.0.1".to_string(),
+                        port: target_port,
+                    },
+                );
+                targets.insert(
+                    "localhost".to_string(),
+                    TargetConfig {
+                        host: "127.0.0.1".to_string(),
+                        port: target_port,
+                    },
+                );
                 tokio::spawn(async move {
-                    let _ = handle_connection(stream, &target_config).await;
+                    let _ = handle_connection(stream, &targets).await;
                 });
             }
         });
@@ -500,6 +555,24 @@ mod tests {
         }
     }
 
+    mod domain_routing {
+        use super::*;
+
+        #[tokio::test]
+        async fn routes_to_correct_target() {
+            let tcp_port = start_echo_server().await.unwrap();
+            let ws_port = start_proxy_server(tcp_port).await.unwrap();
+
+            // This should work because start_proxy_server adds localhost as a valid domain
+            let (mut sender, mut receiver) = connect_websocket(ws_port).await.unwrap();
+
+            let test_data = b"Domain routing test";
+            send_binary_message(&mut sender, test_data).await.unwrap();
+            let received = receive_binary_message(&mut receiver).await.unwrap();
+            assert_eq!(received, test_data);
+        }
+    }
+
     mod error_handling {
         use super::*;
 
@@ -511,12 +584,16 @@ mod tests {
             tokio::spawn(async move {
                 let listener = TcpListener::bind(("127.0.0.1", ws_port)).await.unwrap();
                 while let Ok((stream, _)) = listener.accept().await {
-                    let target_config = TargetConfig {
-                        host: "127.0.0.1".to_string(),
-                        port: nonexistent_tcp_port,
-                    };
+                    let mut targets = HashMap::new();
+                    targets.insert(
+                        "localhost".to_string(),
+                        TargetConfig {
+                            host: "127.0.0.1".to_string(),
+                            port: nonexistent_tcp_port,
+                        },
+                    );
                     tokio::spawn(async move {
-                        let _ = handle_connection(stream, &target_config).await;
+                        let _ = handle_connection(stream, &targets).await;
                     });
                 }
             });

@@ -2,6 +2,7 @@
 ip = "0.0.0.0"
 port = 80
 
-[target]
-ip = "127.0.0.1"
-port = 8080
+[targets]
+"example.com" = { host = "127.0.0.1", port = 8080 }
+"api.example.com" = { host = "127.0.0.1", port = 8081 }
+"localhost" = { host = "127.0.0.1", port = 8080 }
