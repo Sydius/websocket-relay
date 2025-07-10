@@ -23,7 +23,7 @@ struct ListenConfig {
 
 #[derive(Clone, Deserialize)]
 struct TargetConfig {
-    ip: String,
+    host: String,
     port: u16,
 }
 
@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
         config_file = "config.toml",
         listen_ip = %config.listen.ip,
         listen_port = config.listen.port,
-        target_ip = %config.target.ip,
+        target_host = %config.target.host,
         target_port = config.target.port,
         "Configuration loaded"
     );
@@ -53,8 +53,6 @@ async fn main() -> Result<()> {
 
     info!(
         listen_addr = %addr,
-        target_ip = %config.target.ip,
-        target_port = config.target.port,
         "WebSocket proxy listening"
     );
 
@@ -85,7 +83,7 @@ async fn handle_socket(
     websocket: WebSocketStream<TcpStream>,
     target_config: &TargetConfig,
 ) -> Result<()> {
-    let target_addr = format!("{}:{}", target_config.ip, target_config.port);
+    let target_addr = format!("{}:{}", target_config.host, target_config.port);
 
     debug!(target_addr = %target_addr, "Attempting to connect to target server");
     let tcp_stream = TcpStream::connect(&target_addr)
@@ -258,7 +256,7 @@ mod tests {
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let target_config = TargetConfig {
-                    ip: "127.0.0.1".to_string(),
+                    host: "127.0.0.1".to_string(),
                     port: target_port,
                 };
                 tokio::spawn(async move {
@@ -514,7 +512,7 @@ mod tests {
                 let listener = TcpListener::bind(("127.0.0.1", ws_port)).await.unwrap();
                 while let Ok((stream, _)) = listener.accept().await {
                     let target_config = TargetConfig {
-                        ip: "127.0.0.1".to_string(),
+                        host: "127.0.0.1".to_string(),
                         port: nonexistent_tcp_port,
                     };
                     tokio::spawn(async move {
