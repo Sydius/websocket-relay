@@ -4,7 +4,9 @@ use tokio::{net::TcpListener, spawn};
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, error, info, warn};
 
-use wsproxy::{StreamType, handle_connection, is_proxy_ip_allowed, load_config, load_tls_config};
+use websocket_relay::{
+    StreamType, handle_connection, is_proxy_ip_allowed, load_config, load_tls_config,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -36,7 +38,7 @@ async fn main() -> Result<()> {
     info!(
         listen_addr = %addr,
         tls_enabled = tls_acceptor.is_some(),
-        "WebSocket proxy listening"
+        "WebSocket relay listening"
     );
 
     while let Ok((stream, addr)) = listener.accept().await {
@@ -100,7 +102,7 @@ mod tests {
         connect_async,
         tungstenite::{Message, client::IntoClientRequest, http::HeaderValue},
     };
-    use wsproxy::{BUFFER_SIZE, TargetConfig, parse_original_client_ip};
+    use websocket_relay::{BUFFER_SIZE, TargetConfig, parse_original_client_ip};
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(1);
     const SERVER_STARTUP_DELAY: Duration = Duration::from_millis(100);
@@ -305,7 +307,7 @@ mod tests {
             let (ws_port, _) = setup_proxy_with_echo_server().await.unwrap();
             let (mut sender, mut receiver) = connect_websocket(ws_port).await.unwrap();
 
-            let test_data = b"Hello WebSocket Proxy!";
+            let test_data = b"Hello WebSocket Relay!";
             send_binary_message(&mut sender, test_data).await.unwrap();
 
             let received = receive_binary_message(&mut receiver).await.unwrap();

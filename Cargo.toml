@@ -1,11 +1,11 @@
 [package]
-name = "wsproxy"
+name = "websocket-relay"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
 authors = ["Christopher Allen Ogden"]
-description = "A WebSocket-to-TCP proxy server with TLS support and domain-based routing"
-keywords = ["websocket", "proxy", "tcp", "tls", "networking"]
+description = "A WebSocket-to-TCP relay server with TLS support and domain-based routing"
+keywords = ["websocket", "relay", "tcp", "tls", "networking"]
 categories = ["network-programming", "web-programming"]
 
 [dependencies]

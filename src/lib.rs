@@ -1,6 +1,6 @@
-//! WebSocket Proxy Server
+//! WebSocket Relay Server
 //!
-//! A WebSocket proxy that routes connections based on Host headers to different TCP backends.
+//! A WebSocket relay that routes connections based on Host headers to different TCP backends.
 //! Supports TLS termination, IP filtering, and client IP extraction from X-Forwarded-For headers.
 
 pub mod config;
