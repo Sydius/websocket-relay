@@ -1,5 +1,6 @@
 # WebSocket Relay
 
+[![Crates.io](https://img.shields.io/crates/v/websocket-relay.svg)](https://crates.io/crates/websocket-relay)
 [![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
 [![Security Audit](../../actions/workflows/security.yml/badge.svg)](../../actions/workflows/security.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
