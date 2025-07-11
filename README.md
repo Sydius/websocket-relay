@@ -32,7 +32,7 @@ port = 80
 - **listen.ip**: IP address to bind the WebSocket server
 - **listen.port**: Port for the WebSocket server
 - **listen.allowed_proxy_ips** (optional): List of IP addresses or CIDR ranges
-  that are allowed to connect as reverse proxy. If not specified, all IPs are
+  that are allowed to connect as reverse proxies. If not specified, all IPs are
   allowed.
 - **listen.tls** (optional): TLS configuration for secure WebSocket connections
   (wss://)
@@ -64,7 +64,7 @@ The relay will:
 
 For enhanced security, you can restrict which reverse proxy IP addresses are
 allowed to connect to the WebSocket relay server. This is useful when you want
-to ensure only specific reverse proxy can establish connections.
+to ensure only specific reverse proxies can establish connections.
 
 Configure the `allowed_proxy_ips` option in your `config.toml`:
 
