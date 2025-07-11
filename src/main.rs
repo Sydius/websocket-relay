@@ -1,24 +1,23 @@
 use anyhow::{Context, Result, anyhow};
 use futures_util::{SinkExt, StreamExt};
-use rustls_pemfile::{certs, private_key};
 use std::{
     collections::HashMap,
-    fs::File,
-    io::BufReader,
     net::SocketAddr,
     sync::{Arc, Mutex},
 };
 
 mod config;
-use config::{TargetConfig, TlsConfig, load_config};
+use config::{TargetConfig, load_config};
 mod security;
 use security::{is_proxy_ip_allowed, parse_original_client_ip};
+mod tls;
+use tls::load_tls_config;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     spawn,
 };
-use tokio_rustls::{TlsAcceptor, rustls};
+use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::{
     WebSocketStream, accept_hdr_async,
     tungstenite::{
@@ -89,32 +88,6 @@ impl StreamType {
             Self::Tls(stream) => stream.get_ref().0.peer_addr(),
         }
     }
-}
-
-fn load_tls_config(tls_config: &TlsConfig) -> Result<rustls::ServerConfig> {
-    let cert_file = File::open(&tls_config.cert_file)
-        .with_context(|| format!("Failed to open certificate file: {}", tls_config.cert_file))?;
-    let key_file = File::open(&tls_config.key_file)
-        .with_context(|| format!("Failed to open private key file: {}", tls_config.key_file))?;
-
-    let cert_chain = certs(&mut BufReader::new(cert_file))
-        .collect::<Result<Vec<_>, _>>()
-        .context("Failed to parse certificate file")?;
-
-    if cert_chain.is_empty() {
-        return Err(anyhow!("No certificates found in certificate file"));
-    }
-
-    let private_key = private_key(&mut BufReader::new(key_file))
-        .context("Failed to parse private key file")?
-        .ok_or_else(|| anyhow!("No private key found in key file"))?;
-
-    let config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(cert_chain, private_key)
-        .context("Failed to create TLS server config")?;
-
-    Ok(config)
 }
 
 #[tokio::main]
