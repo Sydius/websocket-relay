@@ -1,6 +1,8 @@
 # WebSocket Relay
 
 [![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
+[![Security Audit](../../actions/workflows/security.yml/badge.svg)](../../actions/workflows/security.yml)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 A high-performance WebSocket-to-TCP relay server with domain-based routing
 built with Rust and Tokio.
