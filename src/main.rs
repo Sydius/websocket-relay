@@ -1,18 +1,21 @@
 use anyhow::{Context, Result, anyhow};
 use futures_util::{SinkExt, StreamExt};
 use ipnet::IpNet;
+use rustls_pemfile::{certs, private_key};
 use serde::Deserialize;
 use std::{
     collections::HashMap,
-    fs,
-    net::IpAddr,
+    fs::{self, File},
+    io::BufReader,
+    net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex},
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     spawn,
 };
+use tokio_rustls::{TlsAcceptor, rustls};
 use tokio_tungstenite::{
     WebSocketStream, accept_hdr_async,
     tungstenite::{
@@ -22,6 +25,66 @@ use tokio_tungstenite::{
     },
 };
 use tracing::{debug, error, info, warn};
+
+enum StreamType {
+    Plain(TcpStream),
+    Tls(Box<tokio_rustls::server::TlsStream<TcpStream>>),
+}
+
+impl AsyncRead for StreamType {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match &mut *self {
+            Self::Plain(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
+            Self::Tls(stream) => std::pin::Pin::new(stream).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for StreamType {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<Result<usize, std::io::Error>> {
+        match &mut *self {
+            Self::Plain(stream) => std::pin::Pin::new(stream).poll_write(cx, buf),
+            Self::Tls(stream) => std::pin::Pin::new(stream).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        match &mut *self {
+            Self::Plain(stream) => std::pin::Pin::new(stream).poll_flush(cx),
+            Self::Tls(stream) => std::pin::Pin::new(stream).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        match &mut *self {
+            Self::Plain(stream) => std::pin::Pin::new(stream).poll_shutdown(cx),
+            Self::Tls(stream) => std::pin::Pin::new(stream).poll_shutdown(cx),
+        }
+    }
+}
+
+impl StreamType {
+    fn peer_addr(&self) -> Result<SocketAddr, std::io::Error> {
+        match self {
+            Self::Plain(stream) => stream.peer_addr(),
+            Self::Tls(stream) => stream.get_ref().0.peer_addr(),
+        }
+    }
+}
 
 #[derive(Deserialize)]
 struct Config {
@@ -34,6 +97,13 @@ struct ListenConfig {
     ip: String,
     port: u16,
     allowed_proxy_ips: Option<Vec<String>>,
+    tls: Option<TlsConfig>,
+}
+
+#[derive(Deserialize)]
+struct TlsConfig {
+    cert_file: String,
+    key_file: String,
 }
 
 #[derive(Clone, Deserialize)]
@@ -45,6 +115,32 @@ struct TargetConfig {
 fn load_config() -> Result<Config> {
     let content = fs::read_to_string("config.toml").context("Failed to read config.toml file")?;
     toml::from_str(&content).context("Failed to parse config.toml as valid TOML")
+}
+
+fn load_tls_config(tls_config: &TlsConfig) -> Result<rustls::ServerConfig> {
+    let cert_file = File::open(&tls_config.cert_file)
+        .with_context(|| format!("Failed to open certificate file: {}", tls_config.cert_file))?;
+    let key_file = File::open(&tls_config.key_file)
+        .with_context(|| format!("Failed to open private key file: {}", tls_config.key_file))?;
+
+    let cert_chain = certs(&mut BufReader::new(cert_file))
+        .collect::<Result<Vec<_>, _>>()
+        .context("Failed to parse certificate file")?;
+
+    if cert_chain.is_empty() {
+        return Err(anyhow!("No certificates found in certificate file"));
+    }
+
+    let private_key = private_key(&mut BufReader::new(key_file))
+        .context("Failed to parse private key file")?
+        .ok_or_else(|| anyhow!("No private key found in key file"))?;
+
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(cert_chain, private_key)
+        .context("Failed to create TLS server config")?;
+
+    Ok(config)
 }
 
 /// Parses the original client IP from X-Forwarded-For header
@@ -92,11 +188,20 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let config = load_config()?;
+
+    let tls_acceptor = if let Some(ref tls_config) = config.listen.tls {
+        let server_config = load_tls_config(tls_config)?;
+        Some(TlsAcceptor::from(Arc::new(server_config)))
+    } else {
+        None
+    };
+
     info!(
         config_file = "config.toml",
         listen_ip = %config.listen.ip,
         listen_port = config.listen.port,
         targets_count = config.targets.len(),
+        tls_enabled = tls_acceptor.is_some(),
         "Configuration loaded"
     );
 
@@ -107,19 +212,36 @@ async fn main() -> Result<()> {
 
     info!(
         listen_addr = %addr,
+        tls_enabled = tls_acceptor.is_some(),
         "WebSocket proxy listening"
     );
 
     while let Ok((stream, addr)) = listener.accept().await {
         let targets = config.targets.clone();
         let allowed_proxy_ips = config.listen.allowed_proxy_ips.clone();
+        let acceptor = tls_acceptor.clone();
 
         spawn(async move {
             // Check if the proxy IP is allowed
             match is_proxy_ip_allowed(addr.ip(), allowed_proxy_ips.as_ref()) {
                 Ok(true) => {
                     debug!(proxy_addr = %addr, "Proxy IP allowed, accepting connection");
-                    if let Err(e) = handle_connection(stream, &targets).await {
+
+                    let stream_type = if let Some(acceptor) = acceptor {
+                        // TLS enabled - perform TLS handshake
+                        match acceptor.accept(stream).await {
+                            Ok(tls_stream) => StreamType::Tls(Box::new(tls_stream)),
+                            Err(e) => {
+                                error!(client_addr = %addr, error = %e, "TLS handshake failed");
+                                return;
+                            }
+                        }
+                    } else {
+                        // Plain TCP
+                        StreamType::Plain(stream)
+                    };
+
+                    if let Err(e) = handle_connection(stream_type, &targets).await {
                         error!(client_addr = %addr, error = %e, "Connection failed");
                     }
                 }
@@ -140,7 +262,7 @@ async fn main() -> Result<()> {
 
 #[tracing::instrument(skip(stream, targets), fields(client_addr = %stream.peer_addr().unwrap_or_else(|_| "unknown".parse().unwrap())))]
 async fn handle_connection(
-    stream: TcpStream,
+    stream: StreamType,
     targets: &HashMap<String, TargetConfig>,
 ) -> Result<()> {
     let host_header = Arc::new(Mutex::new(None::<String>));
@@ -222,7 +344,7 @@ async fn handle_connection(
 
 #[tracing::instrument(skip(websocket, target_config, client_ip))]
 async fn handle_socket(
-    websocket: WebSocketStream<TcpStream>,
+    websocket: WebSocketStream<StreamType>,
     target_config: &TargetConfig,
     client_ip: Option<String>,
 ) -> Result<()> {
@@ -435,7 +557,7 @@ mod tests {
                     },
                 );
                 spawn(async move {
-                    let _ = handle_connection(stream, &targets).await;
+                    let _ = handle_connection(StreamType::Plain(stream), &targets).await;
                 });
             }
         });
@@ -505,7 +627,7 @@ mod tests {
                         is_proxy_ip_allowed(addr.ip(), allowed_ips.as_ref()),
                         Ok(true)
                     ) {
-                        let _ = handle_connection(stream, &targets).await;
+                        let _ = handle_connection(StreamType::Plain(stream), &targets).await;
                     } else {
                         // Connection rejected, stream drops automatically
                     }
@@ -753,7 +875,7 @@ mod tests {
                         );
                     }
                     spawn(async move {
-                        let _ = handle_connection(stream, &targets).await;
+                        let _ = handle_connection(StreamType::Plain(stream), &targets).await;
                     });
                 }
             });
@@ -917,7 +1039,7 @@ mod tests {
                         },
                     );
                     spawn(async move {
-                        let _ = handle_connection(stream, &targets).await;
+                        let _ = handle_connection(StreamType::Plain(stream), &targets).await;
                     });
                 }
             });

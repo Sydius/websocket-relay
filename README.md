@@ -28,6 +28,9 @@ port = 80
 - **listen.ip**: IP address to bind the WebSocket server
 - **listen.port**: Port for the WebSocket server
 - **listen.allowed_proxy_ips** (optional): List of IP addresses or CIDR ranges that are allowed to connect as reverse proxies. If not specified, all IPs are allowed.
+- **listen.tls** (optional): TLS configuration for secure WebSocket connections (wss://)
+  - **cert_file**: Path to the PEM-formatted certificate file
+  - **key_file**: Path to the PEM-formatted private key file
 - **targets**: Map of domain names to backend configurations
   - Each target has a `host` and `port` for the TCP backend
 
@@ -72,6 +75,33 @@ allowed_proxy_ips = [
 - IPv6 addresses: `"::1"`, `"2001:db8::/32"`
 
 If `allowed_proxy_ips` is not specified or commented out, all proxy IPs are allowed.
+
+### TLS Configuration
+
+To enable secure WebSocket connections (wss://), add a TLS configuration section:
+
+```toml
+[listen]
+ip = "0.0.0.0"
+port = 443
+[listen.tls]
+cert_file = "cert.pem"
+key_file = "key.pem"
+```
+
+The certificate and private key files must be in PEM format. You can generate self-signed certificates for development using:
+
+```bash
+# Generate private key
+openssl genrsa -out key.pem 2048
+
+# Generate self-signed certificate
+openssl req -new -x509 -key key.pem -out cert.pem -days 365
+```
+
+For production, use certificates from a trusted Certificate Authority (CA) like Let's Encrypt.
+
+**Note**: When TLS is enabled, the proxy only accepts secure WebSocket connections (wss://). To support both ws:// and wss://, run two separate instances on different ports.
 
 ## Reverse Proxy Setup
 

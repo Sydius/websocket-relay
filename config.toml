@@ -4,6 +4,11 @@ port = 80
 # Optional: Restrict which reverse proxy IPs can connect
 # allowed_proxy_ips = ["192.168.1.0/24", "10.0.0.1", "::1"]
 
+# Optional: Enable TLS for secure WebSocket connections (wss://)
+# [listen.tls]
+# cert_file = "cert.pem"
+# key_file = "key.pem"
+
 [targets]
 "example.com" = { host = "127.0.0.1", port = 8080 }
 "api.example.com" = { host = "127.0.0.1", port = 8081 }
