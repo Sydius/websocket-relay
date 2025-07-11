@@ -44,6 +44,16 @@ fn load_config() -> Result<Config> {
     toml::from_str(&content).context("Failed to parse config.toml as valid TOML")
 }
 
+/// Parses the original client IP from X-Forwarded-For header
+/// Format: "client, proxy1, proxy2, ..." - returns the leftmost (original client) IP
+fn parse_original_client_ip(xff_header: &str) -> Option<String> {
+    xff_header
+        .split(',')
+        .next()
+        .map(|ip| ip.trim().to_string())
+        .filter(|ip| !ip.is_empty())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
@@ -87,6 +97,13 @@ async fn handle_connection(
 ) -> Result<()> {
     let host_header = Arc::new(Mutex::new(None::<String>));
     let host_header_clone = host_header.clone();
+    // Get client address before moving the stream
+    let client_addr = stream
+        .peer_addr()
+        .unwrap_or_else(|_| "unknown".parse().unwrap());
+
+    let client_ip = Arc::new(Mutex::new(None::<String>));
+    let client_ip_clone = client_ip.clone();
 
     let callback = move |req: &Request, response: Response| {
         if let Some(host) = req.headers().get("host") {
@@ -96,6 +113,18 @@ async fn handle_connection(
                 }
             }
         }
+
+        // Extract original client IP from X-Forwarded-For header
+        if let Some(xff) = req.headers().get("x-forwarded-for") {
+            if let Ok(xff_str) = xff.to_str() {
+                if let Some(original_ip) = parse_original_client_ip(xff_str) {
+                    if let Ok(mut guard) = client_ip_clone.lock() {
+                        *guard = Some(original_ip);
+                    }
+                }
+            }
+        }
+
         Ok(response)
     };
 
@@ -110,28 +139,62 @@ async fn handle_connection(
         .ok_or_else(|| anyhow!("No Host header found in request"))?
         .clone();
 
+    let original_client_ip = client_ip.lock().unwrap().clone();
+
     let target_config = targets
         .get(&host)
         .ok_or_else(|| anyhow!("No target configured for domain: {}", host))?;
 
-    info!(host = %host, target_host = %target_config.host, target_port = target_config.port, "Routing request");
-    handle_socket(ws_stream, target_config).await?;
+    // Log with original client IP if available, otherwise use direct connection IP
+    match original_client_ip {
+        Some(ref ip) => {
+            info!(
+                host = %host,
+                target_host = %target_config.host,
+                target_port = target_config.port,
+                client_ip = %ip,
+                direct_addr = %client_addr,
+                "Routing request"
+            );
+        }
+        None => {
+            info!(
+                host = %host,
+                target_host = %target_config.host,
+                target_port = target_config.port,
+                client_ip = %client_addr,
+                "Routing request"
+            );
+        }
+    }
+
+    handle_socket(ws_stream, target_config, original_client_ip).await?;
     Ok(())
 }
 
-#[tracing::instrument(skip(websocket, target_config))]
+#[tracing::instrument(skip(websocket, target_config, client_ip))]
 async fn handle_socket(
     websocket: WebSocketStream<TcpStream>,
     target_config: &TargetConfig,
+    client_ip: Option<String>,
 ) -> Result<()> {
     let target_addr = format!("{}:{}", target_config.host, target_config.port);
 
-    debug!(target_addr = %target_addr, "Attempting to connect to target server");
+    if let Some(ref ip) = client_ip {
+        debug!(target_addr = %target_addr, client_ip = %ip, "Attempting to connect to target server");
+    } else {
+        debug!(target_addr = %target_addr, "Attempting to connect to target server");
+    }
+
     let tcp_stream = TcpStream::connect(&target_addr)
         .await
         .with_context(|| format!("Failed to connect to target {target_addr}"))?;
 
-    info!(target_addr = %target_addr, "Connected to target server");
+    if let Some(ref ip) = client_ip {
+        info!(target_addr = %target_addr, client_ip = %ip, "Connected to target server");
+    } else {
+        info!(target_addr = %target_addr, "Connected to target server");
+    }
 
     let (mut ws_sender, mut ws_receiver) = websocket.split();
     let (mut tcp_reader, mut tcp_writer) = tcp_stream.into_split();
@@ -203,7 +266,11 @@ async fn handle_socket(
         result = tcp_to_ws => result?,
     }
 
-    info!("Proxy connection closed");
+    if let Some(ref ip) = client_ip {
+        info!(client_ip = %ip, "Proxy connection closed");
+    } else {
+        info!("Proxy connection closed");
+    }
     Ok(())
 }
 
@@ -780,6 +847,91 @@ mod tests {
                 assert!(close_result.is_ok());
             }
             // Connection may fail immediately or close after handshake - both are acceptable
+        }
+    }
+
+    mod client_ip_extraction {
+        use super::*;
+
+        #[test]
+        fn parses_single_ip_from_xff_header() {
+            let xff = "192.168.1.100";
+            let result = parse_original_client_ip(xff);
+            assert_eq!(result, Some("192.168.1.100".to_string()));
+        }
+
+        #[test]
+        fn parses_first_ip_from_xff_chain() {
+            let xff = "203.0.113.195, 198.51.100.178, 192.168.1.1";
+            let result = parse_original_client_ip(xff);
+            assert_eq!(result, Some("203.0.113.195".to_string()));
+        }
+
+        #[test]
+        fn handles_ipv6_addresses() {
+            let xff = "2001:db8:85a3:8d3:1319:8a2e:370:7348, 192.168.1.1";
+            let result = parse_original_client_ip(xff);
+            assert_eq!(
+                result,
+                Some("2001:db8:85a3:8d3:1319:8a2e:370:7348".to_string())
+            );
+        }
+
+        #[test]
+        fn trims_whitespace_around_ips() {
+            let xff = "  192.168.1.100  , 10.0.0.1  ";
+            let result = parse_original_client_ip(xff);
+            assert_eq!(result, Some("192.168.1.100".to_string()));
+        }
+
+        #[test]
+        fn returns_none_for_empty_header() {
+            let xff = "";
+            let result = parse_original_client_ip(xff);
+            assert_eq!(result, None);
+        }
+
+        #[test]
+        fn returns_none_for_whitespace_only() {
+            let xff = "   ";
+            let result = parse_original_client_ip(xff);
+            assert_eq!(result, None);
+        }
+
+        #[test]
+        fn handles_single_comma() {
+            let xff = "192.168.1.100,";
+            let result = parse_original_client_ip(xff);
+            assert_eq!(result, Some("192.168.1.100".to_string()));
+        }
+
+        #[tokio::test]
+        async fn websocket_extracts_xff_header() {
+            use tokio_tungstenite::tungstenite::http::HeaderValue;
+
+            let tcp_port = start_echo_server().await.unwrap();
+            let ws_port = start_proxy_server(tcp_port).await.unwrap();
+            sleep(SERVER_STARTUP_DELAY).await;
+
+            // Create a WebSocket request with X-Forwarded-For header
+            let url = format!("ws://127.0.0.1:{ws_port}/");
+            let mut request = IntoClientRequest::into_client_request(url).unwrap();
+            request.headers_mut().insert(
+                "x-forwarded-for",
+                HeaderValue::from_str("203.0.113.195, 192.168.1.1").unwrap(),
+            );
+
+            // Connect and send a test message
+            let (ws_stream, _) = connect_async(request).await.unwrap();
+            let (mut sender, mut receiver) = ws_stream.split();
+
+            let test_data = b"Test with XFF header";
+            send_binary_message(&mut sender, test_data).await.unwrap();
+            let received = receive_binary_message(&mut receiver).await.unwrap();
+            assert_eq!(received, test_data);
+
+            // The test passes if no errors occur - the IP extraction happens in logging
+            // which we can't easily test here, but we verify the connection works with XFF headers
         }
     }
 }
