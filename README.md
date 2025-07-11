@@ -60,7 +60,7 @@ The relay will:
 
 ## Security
 
-### Reverse Relay IP Filtering
+### Reverse Proxy IP Filtering
 
 For enhanced security, you can restrict which reverse proxy IP addresses are
 allowed to connect to the WebSocket relay server. This is useful when you want
@@ -118,7 +118,7 @@ Let's Encrypt.
 connections (wss://). To support both ws:// and wss://, run two separate
 instances on different ports.
 
-## Reverse Relay Setup
+## Reverse Proxy Setup
 
 Configure your reverse proxy (nginx, Apache, etc.) to forward WebSocket
 connections to this relay with the appropriate Host header. The relay will
