@@ -1,5 +1,7 @@
 # WebSocket Relay
 
+[![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
+
 A high-performance WebSocket-to-TCP relay server with domain-based routing
 built with Rust and Tokio.
 
