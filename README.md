@@ -10,10 +10,18 @@ built with Rust and Tokio.
 
 ## Overview
 
-This relay accepts WebSocket connections from reverse proxies and forwards
-binary data to target TCP servers based on the Host header. It creates a bridge
-between WebSocket clients and multiple TCP backends, with routing determined by
-domain names.
+This relay accepts WebSocket connections and forwards these to TCP servers,
+effectively allowing browsers or other WebSocket-based clients to communicate
+with servers that only speak TCP.
+
+Multiple target TCP servers are supported and can be routed to based on the
+contents of the `Host` header. For example, requests to `foo.example.com` could
+be routed to one TCP server, while `bar.example.com` go to another.
+
+Both 'plain' WebSockets (`ws://`) and TLS-encrypted WebSockets (`wss://`) are
+supported, depending on the configuration. It can also be put behind a reverse
+proxy such as Nginx and restricted to accept incoming connections only from the
+IP address(es) of that reverse proxy.
 
 ## Configuration
 
@@ -46,22 +54,32 @@ port = 80
 - **targets**: Map of domain names to backend configurations
   - Each target has a `host` and `port` for the TCP backend
 
+## Installation
+
+You can install the relay on a system that has Cargo with:
+
+```bash
+cargo install websocket-relay
+```
+
 ## Usage
 
-1. Create a `config.toml` file with your domain mappings
-2. Run the proxy:
+1. Create a `config.toml` file with your domain mappings (you can use the
+   example in this repository as a starting point).
 
-   ```bash
-   cargo run
-   ```
+2. Run the proxy: `websocket-relay` (it will look for the `config.toml` in the
+   working directory).
 
 The relay will:
 
 1. Listen for WebSocket connections on the configured address
-2. Extract the Host header from incoming requests
+2. Extract the `Host` header from incoming requests
 3. Route connections to the appropriate backend based on domain
 4. Forward binary data bidirectionally between WebSocket and TCP
 5. Reject connections for unknown domains
+
+If present, it will use the `X-Forwarded-For` header to extract the originating
+IP address for the purpose of logging.
 
 ## Security
 
@@ -93,7 +111,7 @@ allowed.
 
 ### TLS Configuration
 
-To enable secure WebSocket connections (wss://), add a TLS configuration
+To enable secure WebSocket connections (`wss://`), add a TLS configuration
 section:
 
 ```toml
@@ -120,16 +138,16 @@ For production, use certificates from a trusted Certificate Authority (CA) like
 Let's Encrypt.
 
 **Note**: When TLS is enabled, the relay only accepts secure WebSocket
-connections (wss://). To support both ws:// and wss://, run two separate
+connections (`wss://`). To support both `ws://` and `wss://`, run two separate
 instances on different ports.
 
 ## Reverse Proxy Setup
 
-Configure your reverse proxy (nginx, Apache, etc.) to forward WebSocket
-connections to this relay with the appropriate Host header. The relay will
+Configure your reverse proxy (Nginx, Apache, etc.) to forward WebSocket
+connections to this relay with the appropriate `Host` header. The relay will
 route based on the domain in the Host header.
 
-Example nginx configuration:
+Example Nginx configuration:
 
 ```nginx
 location /websocket {
