@@ -1,9 +1,11 @@
 use anyhow::{Context, Result, anyhow};
 use futures_util::{SinkExt, StreamExt};
+use ipnet::IpNet;
 use serde::Deserialize;
 use std::{
     collections::HashMap,
     fs,
+    net::IpAddr,
     sync::{Arc, Mutex},
 };
 use tokio::{
@@ -31,6 +33,7 @@ struct Config {
 struct ListenConfig {
     ip: String,
     port: u16,
+    allowed_proxy_ips: Option<Vec<String>>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -52,6 +55,36 @@ fn parse_original_client_ip(xff_header: &str) -> Option<String> {
         .next()
         .map(|ip| ip.trim().to_string())
         .filter(|ip| !ip.is_empty())
+}
+
+/// Checks if a proxy IP address is allowed based on the configured allowlist
+/// Returns true if no allowlist is configured (allow all) or if IP matches any entry
+fn is_proxy_ip_allowed(proxy_ip: IpAddr, allowed_ips: Option<&Vec<String>>) -> Result<bool> {
+    let Some(allowed_list) = allowed_ips else {
+        return Ok(true); // No restrictions configured
+    };
+
+    for allowed_entry in allowed_list {
+        // Try parsing as individual IP address first
+        if let Ok(allowed_ip) = allowed_entry.parse::<IpAddr>() {
+            if proxy_ip == allowed_ip {
+                return Ok(true);
+            }
+        }
+        // Try parsing as CIDR subnet
+        else if let Ok(allowed_net) = allowed_entry.parse::<IpNet>() {
+            if allowed_net.contains(&proxy_ip) {
+                return Ok(true);
+            }
+        } else {
+            return Err(anyhow!(
+                "Invalid IP address or CIDR in allowed_proxy_ips: {}",
+                allowed_entry
+            ));
+        }
+    }
+
+    Ok(false)
 }
 
 #[tokio::main]
@@ -79,10 +112,25 @@ async fn main() -> Result<()> {
 
     while let Ok((stream, addr)) = listener.accept().await {
         let targets = config.targets.clone();
+        let allowed_proxy_ips = config.listen.allowed_proxy_ips.clone();
 
         spawn(async move {
-            if let Err(e) = handle_connection(stream, &targets).await {
-                error!(client_addr = %addr, error = %e, "Connection failed");
+            // Check if the proxy IP is allowed
+            match is_proxy_ip_allowed(addr.ip(), allowed_proxy_ips.as_ref()) {
+                Ok(true) => {
+                    debug!(proxy_addr = %addr, "Proxy IP allowed, accepting connection");
+                    if let Err(e) = handle_connection(stream, &targets).await {
+                        error!(client_addr = %addr, error = %e, "Connection failed");
+                    }
+                }
+                Ok(false) => {
+                    warn!(proxy_addr = %addr, "Proxy IP not in allowlist, rejecting connection");
+                    // Connection is automatically dropped when stream goes out of scope
+                }
+                Err(e) => {
+                    error!(proxy_addr = %addr, error = %e, "Error validating proxy IP, rejecting connection");
+                    // Connection is automatically dropped when stream goes out of scope
+                }
             }
         });
     }
@@ -429,6 +477,44 @@ mod tests {
         let ws_port = start_proxy_server(tcp_port).await?;
         sleep(SERVER_STARTUP_DELAY).await;
         Ok((ws_port, tcp_port))
+    }
+
+    /// Helper to start proxy with specific domain mappings and IP filtering
+    async fn start_proxy_with_ip_filtering(
+        domains: HashMap<String, u16>,
+        allowed_proxy_ips: Option<Vec<String>>,
+    ) -> Result<u16> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let ws_port = listener.local_addr()?.port();
+
+        spawn(async move {
+            while let Ok((stream, addr)) = listener.accept().await {
+                let mut targets = HashMap::new();
+                for (domain, tcp_port) in &domains {
+                    targets.insert(
+                        domain.clone(),
+                        TargetConfig {
+                            host: "127.0.0.1".to_string(),
+                            port: *tcp_port,
+                        },
+                    );
+                }
+                let allowed_ips = allowed_proxy_ips.clone();
+                spawn(async move {
+                    if matches!(
+                        is_proxy_ip_allowed(addr.ip(), allowed_ips.as_ref()),
+                        Ok(true)
+                    ) {
+                        let _ = handle_connection(stream, &targets).await;
+                    } else {
+                        // Connection rejected, stream drops automatically
+                    }
+                });
+            }
+        });
+
+        sleep(SERVER_STARTUP_DELAY).await;
+        Ok(ws_port)
     }
 
     mod proxy_functionality {
@@ -850,6 +936,82 @@ mod tests {
         }
     }
 
+    mod proxy_ip_filtering {
+        use super::*;
+
+        #[test]
+        fn allows_all_when_no_restrictions() {
+            let proxy_ip = "192.168.1.100".parse().unwrap();
+            let allowed_ips = None;
+            assert!(is_proxy_ip_allowed(proxy_ip, allowed_ips).unwrap());
+        }
+
+        #[test]
+        fn allows_exact_ip_match() {
+            let proxy_ip = "192.168.1.100".parse().unwrap();
+            let allowed_ips = Some(vec!["192.168.1.100".to_string()]);
+            assert!(is_proxy_ip_allowed(proxy_ip, allowed_ips.as_ref()).unwrap());
+        }
+
+        #[test]
+        fn rejects_non_matching_ip() {
+            let proxy_ip = "192.168.1.100".parse().unwrap();
+            let allowed_ips = Some(vec!["192.168.1.101".to_string()]);
+            assert!(!is_proxy_ip_allowed(proxy_ip, allowed_ips.as_ref()).unwrap());
+        }
+
+        #[test]
+        fn allows_ip_in_cidr_range() {
+            let proxy_ip = "192.168.1.100".parse().unwrap();
+            let allowed_ips = Some(vec!["192.168.1.0/24".to_string()]);
+            assert!(is_proxy_ip_allowed(proxy_ip, allowed_ips.as_ref()).unwrap());
+        }
+
+        #[test]
+        fn rejects_ip_outside_cidr_range() {
+            let proxy_ip = "192.168.2.100".parse().unwrap();
+            let allowed_ips = Some(vec!["192.168.1.0/24".to_string()]);
+            assert!(!is_proxy_ip_allowed(proxy_ip, allowed_ips.as_ref()).unwrap());
+        }
+
+        #[test]
+        fn allows_ipv6_exact_match() {
+            let proxy_ip = "::1".parse().unwrap();
+            let allowed_ips = Some(vec!["::1".to_string()]);
+            assert!(is_proxy_ip_allowed(proxy_ip, allowed_ips.as_ref()).unwrap());
+        }
+
+        #[test]
+        fn allows_ipv6_in_cidr_range() {
+            let proxy_ip = "2001:db8::1".parse().unwrap();
+            let allowed_ips = Some(vec!["2001:db8::/32".to_string()]);
+            assert!(is_proxy_ip_allowed(proxy_ip, allowed_ips.as_ref()).unwrap());
+        }
+
+        #[test]
+        fn allows_mixed_ipv4_and_ipv6() {
+            let proxy_ip_v4 = "192.168.1.100".parse().unwrap();
+            let proxy_ip_v6 = "::1".parse().unwrap();
+            let allowed_ips = Some(vec!["192.168.1.0/24".to_string(), "::1".to_string()]);
+            assert!(is_proxy_ip_allowed(proxy_ip_v4, allowed_ips.as_ref()).unwrap());
+            assert!(is_proxy_ip_allowed(proxy_ip_v6, allowed_ips.as_ref()).unwrap());
+        }
+
+        #[test]
+        fn returns_error_for_invalid_ip_format() {
+            let proxy_ip = "192.168.1.100".parse().unwrap();
+            let allowed_ips = Some(vec!["invalid-ip".to_string()]);
+            assert!(is_proxy_ip_allowed(proxy_ip, allowed_ips.as_ref()).is_err());
+        }
+
+        #[test]
+        fn returns_error_for_invalid_cidr_format() {
+            let proxy_ip = "192.168.1.100".parse().unwrap();
+            let allowed_ips = Some(vec!["192.168.1.0/99".to_string()]);
+            assert!(is_proxy_ip_allowed(proxy_ip, allowed_ips.as_ref()).is_err());
+        }
+    }
+
     mod client_ip_extraction {
         use super::*;
 
@@ -932,6 +1094,102 @@ mod tests {
 
             // The test passes if no errors occur - the IP extraction happens in logging
             // which we can't easily test here, but we verify the connection works with XFF headers
+        }
+    }
+
+    mod proxy_ip_filtering_integration {
+        use super::*;
+        use tokio_tungstenite::tungstenite::http::HeaderValue;
+
+        /// Helper to create WebSocket connection with custom Host header
+        async fn connect_websocket_with_host(
+            ws_port: u16,
+            host: &str,
+        ) -> Result<(WsSender, WsReceiver)> {
+            let url = format!("ws://127.0.0.1:{ws_port}/");
+            let mut request = IntoClientRequest::into_client_request(url)?;
+            request
+                .headers_mut()
+                .insert("host", HeaderValue::from_str(host)?);
+
+            let (ws_stream, _) = connect_async(request)
+                .await
+                .context("Failed to connect to WebSocket server")?;
+            Ok(ws_stream.split())
+        }
+
+        #[tokio::test]
+        async fn allows_connections_from_allowed_proxy_ip() {
+            let tcp_port = start_echo_server().await.unwrap();
+
+            let mut domains = HashMap::new();
+            domains.insert("localhost".to_string(), tcp_port);
+
+            // Allow connections from localhost (127.0.0.1)
+            let allowed_ips = Some(vec!["127.0.0.1".to_string()]);
+            let ws_port = start_proxy_with_ip_filtering(domains, allowed_ips)
+                .await
+                .unwrap();
+
+            // This should succeed since we're connecting from 127.0.0.1
+            let (mut sender, mut receiver) = connect_websocket_with_host(ws_port, "localhost")
+                .await
+                .unwrap();
+            let test_data = b"Test with allowed IP";
+            send_binary_message(&mut sender, test_data).await.unwrap();
+            let received = receive_binary_message(&mut receiver).await.unwrap();
+            assert_eq!(received, test_data);
+        }
+
+        #[tokio::test]
+        async fn rejects_connections_from_disallowed_proxy_ip() {
+            let tcp_port = start_echo_server().await.unwrap();
+
+            let mut domains = HashMap::new();
+            domains.insert("localhost".to_string(), tcp_port);
+
+            // Only allow connections from a different IP (not 127.0.0.1)
+            let allowed_ips = Some(vec!["192.168.1.100".to_string()]);
+            let ws_port = start_proxy_with_ip_filtering(domains, allowed_ips)
+                .await
+                .unwrap();
+
+            // This should fail since we're connecting from 127.0.0.1, not 192.168.1.100
+            let url = format!("ws://127.0.0.1:{ws_port}/");
+            let result = timeout(TEST_TIMEOUT, connect_async(&url)).await;
+
+            // Connection should either fail immediately or close quickly
+            if let Ok(Ok((ws_stream, _))) = result {
+                let (_, mut receiver) = ws_stream.split();
+                // If connection succeeds initially, it should close quickly
+                let close_result = timeout(TEST_TIMEOUT, receiver.next()).await;
+                assert!(close_result.is_ok()); // Should receive close or timeout
+            } else {
+                // Connection failed immediately, which is expected
+            }
+        }
+
+        #[tokio::test]
+        async fn allows_connections_with_cidr_range() {
+            let tcp_port = start_echo_server().await.unwrap();
+
+            let mut domains = HashMap::new();
+            domains.insert("localhost".to_string(), tcp_port);
+
+            // Allow connections from 127.0.0.0/8 range (includes 127.0.0.1)
+            let allowed_ips = Some(vec!["127.0.0.0/8".to_string()]);
+            let ws_port = start_proxy_with_ip_filtering(domains, allowed_ips)
+                .await
+                .unwrap();
+
+            // This should succeed since 127.0.0.1 is in the 127.0.0.0/8 range
+            let (mut sender, mut receiver) = connect_websocket_with_host(ws_port, "localhost")
+                .await
+                .unwrap();
+            let test_data = b"Test with CIDR range";
+            send_binary_message(&mut sender, test_data).await.unwrap();
+            let received = receive_binary_message(&mut receiver).await.unwrap();
+            assert_eq!(received, test_data);
         }
     }
 }

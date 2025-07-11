@@ -14,6 +14,8 @@ Configure the proxy using a `config.toml` file:
 [listen]
 ip = "0.0.0.0"
 port = 80
+# Optional: Restrict which reverse proxy IPs can connect
+# allowed_proxy_ips = ["192.168.1.0/24", "10.0.0.1", "::1"]
 
 [targets]
 "example.com" = { host = "127.0.0.1", port = 8080 }
@@ -25,6 +27,7 @@ port = 80
 
 - **listen.ip**: IP address to bind the WebSocket server
 - **listen.port**: Port for the WebSocket server
+- **listen.allowed_proxy_ips** (optional): List of IP addresses or CIDR ranges that are allowed to connect as reverse proxies. If not specified, all IPs are allowed.
 - **targets**: Map of domain names to backend configurations
   - Each target has a `host` and `port` for the TCP backend
 
@@ -44,6 +47,31 @@ The proxy will:
 3. Route connections to the appropriate backend based on domain
 4. Forward binary data bidirectionally between WebSocket and TCP
 5. Reject connections for unknown domains
+
+## Security
+
+### Reverse Proxy IP Filtering
+
+For enhanced security, you can restrict which reverse proxy IP addresses are allowed to connect to the WebSocket proxy server. This is useful when you want to ensure only specific reverse proxies can establish connections.
+
+Configure the `allowed_proxy_ips` option in your `config.toml`:
+
+```toml
+[listen]
+ip = "0.0.0.0"
+port = 80
+allowed_proxy_ips = [
+    "192.168.1.10",      # Specific nginx server
+    "10.0.0.0/8",        # Internal network range
+    "::1"                # IPv6 localhost
+]
+```
+
+- Individual IP addresses: `"192.168.1.10"`
+- CIDR ranges: `"192.168.1.0/24"`, `"10.0.0.0/8"`
+- IPv6 addresses: `"::1"`, `"2001:db8::/32"`
+
+If `allowed_proxy_ips` is not specified or commented out, all proxy IPs are allowed.
 
 ## Reverse Proxy Setup
 

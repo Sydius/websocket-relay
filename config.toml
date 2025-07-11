@@ -1,6 +1,8 @@
 [listen]
 ip = "0.0.0.0"
 port = 80
+# Optional: Restrict which reverse proxy IPs can connect
+# allowed_proxy_ips = ["192.168.1.0/24", "10.0.0.1", "::1"]
 
 [targets]
 "example.com" = { host = "127.0.0.1", port = 8080 }
