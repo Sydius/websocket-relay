@@ -26,6 +26,8 @@ use tokio_tungstenite::{
 };
 use tracing::{debug, error, info, warn};
 
+const BUFFER_SIZE: usize = 8192;
+
 enum StreamType {
     Plain(TcpStream),
     Tls(Box<tokio_rustls::server::TlsStream<TcpStream>>),
@@ -406,7 +408,7 @@ async fn handle_socket(
     };
 
     let tcp_to_ws = async {
-        let mut buffer = [0u8; 1024];
+        let mut buffer = [0u8; BUFFER_SIZE];
 
         loop {
             match tcp_reader.read(&mut buffer).await {
@@ -695,9 +697,9 @@ mod tests {
             let large_data = vec![0xAB; 2048];
             send_binary_message(&mut sender, &large_data).await.unwrap();
 
-            // Large messages are split into chunks due to 1024-byte buffer
+            // Large messages are split into chunks due to buffer size
             let mut received_data = Vec::new();
-            let expected_chunks = large_data.len().div_ceil(1024);
+            let expected_chunks = large_data.len().div_ceil(BUFFER_SIZE);
 
             for _ in 0..expected_chunks {
                 let chunk = receive_binary_message(&mut receiver).await.unwrap();
@@ -743,7 +745,7 @@ mod tests {
 
             spawn(async move {
                 if let Ok((mut stream, _)) = tcp_listener.accept().await {
-                    let mut buffer = [0u8; 1024];
+                    let mut buffer = [0u8; BUFFER_SIZE];
                     while let Ok(n) = stream.read(&mut buffer).await {
                         if n == 0 {
                             break;
