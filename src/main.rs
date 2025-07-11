@@ -98,7 +98,7 @@ mod tests {
     };
     use tokio_tungstenite::{
         connect_async,
-        tungstenite::{Message, client::IntoClientRequest},
+        tungstenite::{Message, client::IntoClientRequest, http::HeaderValue},
     };
     use wsproxy::{BUFFER_SIZE, TargetConfig, parse_original_client_ip};
 
@@ -240,6 +240,23 @@ mod tests {
         let ws_port = start_proxy_server(tcp_port).await?;
         sleep(SERVER_STARTUP_DELAY).await;
         Ok((ws_port, tcp_port))
+    }
+
+    /// Helper to create WebSocket connection with custom Host header
+    async fn connect_websocket_with_host(
+        ws_port: u16,
+        host: &str,
+    ) -> Result<(WsSender, WsReceiver)> {
+        let url = format!("ws://127.0.0.1:{ws_port}/");
+        let mut request = IntoClientRequest::into_client_request(url)?;
+        request
+            .headers_mut()
+            .insert("host", HeaderValue::from_str(host)?);
+
+        let (ws_stream, _) = connect_async(request)
+            .await
+            .context("Failed to connect to WebSocket server")?;
+        Ok(ws_stream.split())
     }
 
     /// Helper to start proxy with specific domain mappings and IP filtering
@@ -479,24 +496,6 @@ mod tests {
     mod domain_routing {
         use super::*;
         use std::collections::HashMap;
-        use tokio_tungstenite::tungstenite::http::HeaderValue;
-
-        /// Helper to create WebSocket connection with custom Host header
-        async fn connect_websocket_with_host(
-            ws_port: u16,
-            host: &str,
-        ) -> Result<(WsSender, WsReceiver)> {
-            let url = format!("ws://127.0.0.1:{ws_port}/");
-            let mut request = IntoClientRequest::into_client_request(url)?;
-            request
-                .headers_mut()
-                .insert("host", HeaderValue::from_str(host)?);
-
-            let (ws_stream, _) = connect_async(request)
-                .await
-                .context("Failed to connect to WebSocket server")?;
-            Ok(ws_stream.split())
-        }
 
         /// Helper to start proxy with specific domain mappings
         async fn start_proxy_with_domains(domains: HashMap<String, u16>) -> Result<u16> {
@@ -537,18 +536,20 @@ mod tests {
             let ws_port = start_proxy_with_domains(domains).await.unwrap();
 
             // Test domain1.test routes to tcp_port1
-            let (mut sender1, mut receiver1) = connect_websocket_with_host(ws_port, "domain1.test")
-                .await
-                .unwrap();
+            let (mut sender1, mut receiver1) =
+                super::connect_websocket_with_host(ws_port, "domain1.test")
+                    .await
+                    .unwrap();
             let test_data1 = b"Message for domain1";
             send_binary_message(&mut sender1, test_data1).await.unwrap();
             let received1 = receive_binary_message(&mut receiver1).await.unwrap();
             assert_eq!(received1, test_data1);
 
             // Test domain2.test routes to tcp_port2
-            let (mut sender2, mut receiver2) = connect_websocket_with_host(ws_port, "domain2.test")
-                .await
-                .unwrap();
+            let (mut sender2, mut receiver2) =
+                super::connect_websocket_with_host(ws_port, "domain2.test")
+                    .await
+                    .unwrap();
             let test_data2 = b"Message for domain2";
             send_binary_message(&mut sender2, test_data2).await.unwrap();
             let received2 = receive_binary_message(&mut receiver2).await.unwrap();
@@ -566,11 +567,11 @@ mod tests {
             let ws_port = start_proxy_with_domains(domains).await.unwrap();
 
             // Try unknown domain (we don't care about the specific failure mode)
-            let _ = connect_websocket_with_host(ws_port, "unknown-domain.test").await;
+            let _ = super::connect_websocket_with_host(ws_port, "unknown-domain.test").await;
 
             // The real test: verify server still processes valid domains correctly
             let (mut sender, mut receiver) =
-                connect_websocket_with_host(ws_port, "known-domain.test")
+                super::connect_websocket_with_host(ws_port, "known-domain.test")
                     .await
                     .unwrap();
             let test_data = b"Server still works";
@@ -590,7 +591,7 @@ mod tests {
 
             // Test with port in Host header
             let (mut sender, mut receiver) =
-                connect_websocket_with_host(ws_port, "example.com:8080")
+                super::connect_websocket_with_host(ws_port, "example.com:8080")
                     .await
                     .unwrap();
             let test_data = b"Message with port";
@@ -612,7 +613,7 @@ mod tests {
 
             // Test service-a.test routes correctly
             let (mut sender1, mut receiver1) =
-                connect_websocket_with_host(ws_port, "service-a.test")
+                super::connect_websocket_with_host(ws_port, "service-a.test")
                     .await
                     .unwrap();
             let test_data1 = b"Message for service A";
@@ -622,7 +623,7 @@ mod tests {
 
             // Test service-b.test routes correctly
             let (mut sender2, mut receiver2) =
-                connect_websocket_with_host(ws_port, "service-b.test")
+                super::connect_websocket_with_host(ws_port, "service-b.test")
                     .await
                     .unwrap();
             let test_data2 = b"Message for service B";
@@ -650,9 +651,10 @@ mod tests {
 
             // Connection may fail at various points - what matters is no server crash
             // Test that server continues working by making a valid connection
-            let (mut sender, mut receiver) = connect_websocket_with_host(ws_port, "example.com")
-                .await
-                .unwrap();
+            let (mut sender, mut receiver) =
+                super::connect_websocket_with_host(ws_port, "example.com")
+                    .await
+                    .unwrap();
             let test_data = b"Server still works";
             send_binary_message(&mut sender, test_data).await.unwrap();
             let received = receive_binary_message(&mut receiver).await.unwrap();
@@ -862,24 +864,6 @@ mod tests {
 
     mod proxy_ip_filtering_integration {
         use super::*;
-        use tokio_tungstenite::tungstenite::http::HeaderValue;
-
-        /// Helper to create WebSocket connection with custom Host header
-        async fn connect_websocket_with_host(
-            ws_port: u16,
-            host: &str,
-        ) -> Result<(WsSender, WsReceiver)> {
-            let url = format!("ws://127.0.0.1:{ws_port}/");
-            let mut request = IntoClientRequest::into_client_request(url)?;
-            request
-                .headers_mut()
-                .insert("host", HeaderValue::from_str(host)?);
-
-            let (ws_stream, _) = connect_async(request)
-                .await
-                .context("Failed to connect to WebSocket server")?;
-            Ok(ws_stream.split())
-        }
 
         #[tokio::test]
         async fn allows_connections_from_allowed_proxy_ip() {
@@ -895,9 +879,10 @@ mod tests {
                 .unwrap();
 
             // This should succeed since we're connecting from 127.0.0.1
-            let (mut sender, mut receiver) = connect_websocket_with_host(ws_port, "localhost")
-                .await
-                .unwrap();
+            let (mut sender, mut receiver) =
+                super::connect_websocket_with_host(ws_port, "localhost")
+                    .await
+                    .unwrap();
             let test_data = b"Test with allowed IP";
             send_binary_message(&mut sender, test_data).await.unwrap();
             let received = receive_binary_message(&mut receiver).await.unwrap();
@@ -946,9 +931,10 @@ mod tests {
                 .unwrap();
 
             // This should succeed since 127.0.0.1 is in the 127.0.0.0/8 range
-            let (mut sender, mut receiver) = connect_websocket_with_host(ws_port, "localhost")
-                .await
-                .unwrap();
+            let (mut sender, mut receiver) =
+                super::connect_websocket_with_host(ws_port, "localhost")
+                    .await
+                    .unwrap();
             let test_data = b"Test with CIDR range";
             send_binary_message(&mut sender, test_data).await.unwrap();
             let received = receive_binary_message(&mut receiver).await.unwrap();
