@@ -5,6 +5,7 @@ edition = "2024"
 license = "MIT"
 authors = ["Christopher Allen Ogden"]
 description = "A WebSocket-to-TCP relay server with TLS support and domain-based routing"
+repository = "https://github.com/Sydius/websocket-relay.git"
 keywords = ["websocket", "relay", "tcp", "tls", "networking"]
 categories = ["network-programming", "web-programming"]
 
