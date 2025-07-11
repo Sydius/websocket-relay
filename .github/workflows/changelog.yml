@@ -1,0 +1,39 @@
+name: Update Changelog
+
+on:
+  workflow_dispatch:  # Manual trigger only
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  changelog:
+    name: Update Changelog
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Need full history for git-cliff
+
+    - name: Install git-cliff
+      run: cargo install git-cliff
+
+    - name: Update unreleased changelog
+      run: |
+        git-cliff --unreleased --prepend CHANGELOG.md
+        
+        # Check if there are changes
+        if git diff --quiet CHANGELOG.md; then
+          echo "No changelog updates needed"
+          exit 0
+        fi
+        
+        # Commit changes
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add CHANGELOG.md
+        git commit -m "Update unreleased changelog [skip ci]"
+        git push
