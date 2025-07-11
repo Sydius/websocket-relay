@@ -2,14 +2,16 @@ use anyhow::{Context, Result, anyhow};
 use futures_util::{SinkExt, StreamExt};
 use ipnet::IpNet;
 use rustls_pemfile::{certs, private_key};
-use serde::Deserialize;
 use std::{
     collections::HashMap,
-    fs::{self, File},
+    fs::File,
     io::BufReader,
     net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex},
 };
+
+mod config;
+use config::{TargetConfig, TlsConfig, load_config};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -86,37 +88,6 @@ impl StreamType {
             Self::Tls(stream) => stream.get_ref().0.peer_addr(),
         }
     }
-}
-
-#[derive(Deserialize)]
-struct Config {
-    listen: ListenConfig,
-    targets: HashMap<String, TargetConfig>,
-}
-
-#[derive(Deserialize)]
-struct ListenConfig {
-    ip: String,
-    port: u16,
-    allowed_proxy_ips: Option<Vec<String>>,
-    tls: Option<TlsConfig>,
-}
-
-#[derive(Deserialize)]
-struct TlsConfig {
-    cert_file: String,
-    key_file: String,
-}
-
-#[derive(Clone, Deserialize)]
-struct TargetConfig {
-    host: String,
-    port: u16,
-}
-
-fn load_config() -> Result<Config> {
-    let content = fs::read_to_string("config.toml").context("Failed to read config.toml file")?;
-    toml::from_str(&content).context("Failed to parse config.toml as valid TOML")
 }
 
 fn load_tls_config(tls_config: &TlsConfig) -> Result<rustls::ServerConfig> {
