@@ -4,6 +4,7 @@ use std::net::IpAddr;
 
 /// Parses the original client IP from X-Forwarded-For header
 /// Format: "client, proxy1, proxy2, ..." - returns the leftmost (original client) IP
+#[must_use]
 pub fn parse_original_client_ip(xff_header: &str) -> Option<String> {
     xff_header
         .split(',')

@@ -1,19 +1,10 @@
 use anyhow::{Context, Result};
 use std::sync::Arc;
-
-mod config;
-use config::load_config;
-mod proxy;
-use proxy::handle_connection;
-mod security;
-use security::is_proxy_ip_allowed;
-mod stream;
-use stream::StreamType;
-mod tls;
-use tls::load_tls_config;
 use tokio::{net::TcpListener, spawn};
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, error, info, warn};
+
+use wsproxy::{StreamType, handle_connection, is_proxy_ip_allowed, load_config, load_tls_config};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -95,9 +86,6 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::TargetConfig;
-    use crate::proxy::BUFFER_SIZE;
-    use crate::security::parse_original_client_ip;
     use anyhow::bail;
     use futures_util::{SinkExt, StreamExt};
     use std::collections::HashMap;
@@ -112,6 +100,7 @@ mod tests {
         connect_async,
         tungstenite::{Message, client::IntoClientRequest},
     };
+    use wsproxy::{BUFFER_SIZE, TargetConfig, parse_original_client_ip};
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(1);
     const SERVER_STARTUP_DELAY: Duration = Duration::from_millis(100);

@@ -2,6 +2,7 @@ use anyhow::{Context, Result, anyhow};
 use futures_util::{SinkExt, StreamExt};
 use std::{
     collections::HashMap,
+    hash::BuildHasher,
     sync::{Arc, Mutex},
 };
 use tokio::{
@@ -25,9 +26,9 @@ use crate::stream::StreamType;
 pub const BUFFER_SIZE: usize = 8192;
 
 #[tracing::instrument(skip(stream, targets), fields(client_addr = %stream.peer_addr().unwrap_or_else(|_| "unknown".parse().unwrap())))]
-pub async fn handle_connection(
+pub async fn handle_connection<S: BuildHasher + Sync>(
     stream: StreamType,
-    targets: &HashMap<String, TargetConfig>,
+    targets: &HashMap<String, TargetConfig, S>,
 ) -> Result<()> {
     let host_header = Arc::new(Mutex::new(None::<String>));
     let host_header_clone = host_header.clone();
