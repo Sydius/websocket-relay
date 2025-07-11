@@ -8,16 +8,11 @@ updates:
       time: "09:00"
       timezone: "UTC"
     open-pull-requests-limit: 10
-    reviewers:
-      - "Sydius"
     assignees:
       - "Sydius"
     commit-message:
       prefix: "deps"
       include: "scope"
-    labels:
-      - "dependencies"
-      - "rust"
 
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -26,6 +21,3 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "ci"
-    labels:
-      - "github-actions"
-      - "ci"
